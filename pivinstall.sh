@@ -57,7 +57,6 @@ easyrsaRel="https://github.com/OpenVPN/easy-rsa/releases/download/v${easyrsaVer}
 
 ######## Undocumented Flags. Shhh ########
 runUnattended=false
-usePiholeDNS=false
 skipSpaceCheck=false
 reconfigure=false
 showUnsupportedNICs=false
@@ -226,9 +225,6 @@ flagsCheck() {
       "--unattended")
         runUnattended=true
         unattendedConfig="${!j}"
-        ;;
-      "--use-pihole")
-        usePiholeDNS=true
         ;;
       "--reconfigure")
         reconfigure=true
@@ -580,11 +576,7 @@ preconfigurePackages() {
 
   # We set static IP only on Raspberry Pi OS
   if checkStaticIpSupported; then
-    if [[ "${OSCN}" != "bookworm" ]]; then
-      BASE_DEPS+=(dhcpcd5)
-    else
-      useNetworkManager=true
-    fi
+    BASE_DEPS+=(dhcpcd5)
   fi
 
   if [[ "${PKG_MANAGER}" == 'apt-get' ]]; then
@@ -1091,6 +1083,7 @@ checkipv6uplink() {
     --max-time 3 \
     --connect-timeout 3 \
     --silent \
+    --fail \
     -6 \
     https://google.com \
     > /dev/null
@@ -1358,11 +1351,22 @@ If you are not sure, please just keep the default." "${r}" "${c}"
 }
 
 setDHCPCD() {
+  # Append these lines to dhcpcd.conf to enable a static IP
+  {
+    echo "interface ${IPv4dev}"
+    echo "static ip_address=${IPv4addr}"
+    echo "static routers=${IPv4gw}"
+    echo "static domain_name_servers=${IPv4dns}"
+  } | ${SUDO} tee -a "${dhcpcdFile}" > /dev/null
+}
+
+setStaticIPv4() {
+  # Tries to set the IPv4 address
   if [[ -f /etc/dhcpcd.conf ]]; then
     if grep -q "${IPv4addr}" "${dhcpcdFile}"; then
       echo "::: Static IP already configured."
     else
-      writeDHCPCDConf
+      setDHCPCD
       ${SUDO} ip addr replace dev "${IPv4dev}" "${IPv4addr}"
       echo ":::"
       echo -n "::: Setting IP to ${IPv4addr}.  "
@@ -1372,40 +1376,6 @@ setDHCPCD() {
   else
     err "::: Critical: Unable to locate configuration file to set static IPv4 address!"
     exit 1
-  fi
-}
-
-writeDHCPCDConf() {
-  # Append these lines to dhcpcd.conf to enable a static IP
-  {
-    echo "interface ${IPv4dev}"
-    echo "static ip_address=${IPv4addr}"
-    echo "static routers=${IPv4gw}"
-    echo "static domain_name_servers=${IPv4dns}"
-  } | ${SUDO} tee -a "${dhcpcdFile}" > /dev/null
-
-}
-
-setNetworkManager() {
-  connectionUUID=$(nmcli -t con show --active \
-    | awk -v ref="${IPv4dev}" -F: 'match($0, ref){print $2}')
-
-  ${SUDO} nmcli con mod "${connectionUUID}" \
-    ipv4.addresses "${IPv4addr}" \
-    ipv4.gateway "${IPv4gw}" \
-    ipv4.dns "${IPv4dns}" \
-    ipv4.method "manual"
-}
-
-setStaticIPv4() {
-  # Tries to set the IPv4 address
-  if [[ -v useNetworkManager ]]; then
-    echo "::: Using Network manager"
-    setNetworkManager
-    echo "useNetworkManager=${useNetworkManager}" >> "${tempsetupVarsFile}"
-  else
-    echo "::: Using DHCPCD"
-    setDHCPCD
   fi
 }
 
@@ -1428,7 +1398,7 @@ chooseUser() {
     else
       if awk -F':' '$3>=1000 && $3<=60000 {print $1}' /etc/passwd \
         | grep -qw "${install_user}"; then
-        echo "::: ${install_user} will hold your VPN client configuration files."
+        echo "::: ${install_user} will hold your ovpn configurations."
       else
         echo "::: User ${install_user} does not exist, creating..."
 
@@ -1717,59 +1687,6 @@ installPiVPN() {
   writeVPNTempVarsFile
 }
 
-decIPv4ToDot() {
-  local a b c d
-  a=$((($1 & 4278190080) >> 24))
-  b=$((($1 & 16711680) >> 16))
-  c=$((($1 & 65280) >> 8))
-  d=$(($1 & 255))
-  printf "%s.%s.%s.%s\n" $a $b $c $d
-}
-
-dotIPv4ToDec() {
-  local original_ifs=$IFS
-  IFS='.'
-  read -r -a array_ip <<< "$1"
-  IFS=$original_ifs
-  printf "%s\n" $((array_ip[0] * 16777216 + array_ip[1] * 65536 + array_ip[2] * 256 + array_ip[3]))
-}
-
-dotIPv4FirstDec() {
-  local decimal_ip decimal_mask
-  decimal_ip=$(dotIPv4ToDec "$1")
-  decimal_mask=$((2 ** 32 - 1 ^ (2 ** (32 - $2) - 1)))
-  printf "%s\n" "$((decimal_ip & decimal_mask))"
-}
-
-dotIPv4LastDec() {
-  local decimal_ip decimal_mask_inv
-  decimal_ip=$(dotIPv4ToDec "$1")
-  decimal_mask_inv=$((2 ** (32 - $2) - 1))
-  printf "%s\n" "$((decimal_ip | decimal_mask_inv))"
-}
-
-decIPv4ToHex() {
-  local hex
-  hex="$(printf "%08x\n" "$1")"
-  quartet_hi=${hex:0:4}
-  quartet_lo=${hex:4:4}
-  # Removes leading zeros from quartets, purely for aesthetic reasons
-  # Source: https://stackoverflow.com/a/19861690
-  leading_zeros_hi="${quartet_hi%%[!0]*}"
-  leading_zeros_lo="${quartet_lo%%[!0]*}"
-  printf "%s:%s\n" "${quartet_hi#"${leading_zeros_hi}"}" "${quartet_lo#"${leading_zeros_lo}"}"
-}
-
-cidrToMask() {
-  # Source: https://stackoverflow.com/a/20767392
-  set -- $((5 - (${1} / 8))) \
-    255 255 255 255 \
-    $(((255 << (8 - (${1} % 8))) & 255)) \
-    0 0 0
-  shift "${1}"
-  echo "${1-0}.${2-0}.${3-0}.${4-0}"
-}
-
 setVPNDefaultVars() {
   # Allow custom subnetClass via unattend setupVARs file.
   # Use default if not provided.
@@ -1783,99 +1700,43 @@ setVPNDefaultVars() {
 }
 
 generateRandomSubnet() {
+  local MATCHES
   # Source: https://community.openvpn.net/openvpn/wiki/AvoidRoutingConflicts
-  declare -a excluded_subnets_dec=(
-    167772160 167772415   # 10.0.0.0/24
-    167772416 167772671   # 10.0.1.0/24
-    167837952 167838207   # 10.1.1.0/24
-    167840256 167840511   # 10.1.10.0/24
-    167903232 167903487   # 10.2.0.0/24
-    168296448 168296703   # 10.8.0.0/24
-    168427776 168428031   # 10.10.1.0/24
-    173693440 173693695   # 10.90.90.0/24
-    174326016 174326271   # 10.100.1.0/24
-    184549120 184549375   # 10.255.255.0/24
-    3232235520 3232235775 # 192.168.0.0/24
-    3232235776 3232236031 # 192.168.1.0/24
-  )
+  declare -a SUBNET_EXCLUDE_LIST
 
-  # Add numeric ranges to the previous array
-  readarray -t currently_used_subnets <<< "$(ip route show \
+  SUBNET_EXCLUDE_LIST=(10.0.0.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.0.1.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.1.1.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.1.10.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.2.0.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.8.0.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.10.1.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.90.90.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.100.1.0/24)
+  SUBNET_EXCLUDE_LIST+=(10.255.255.0/24)
+
+  readarray -t CURRENTLY_USED_SUBNETS <<< "$(ip route show \
     | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\/[0-9]{1,2}')"
+  SUBNET_EXCLUDE_LIST=("${SUBNET_EXCLUDE_LIST[@]}"
+    "${CURRENTLY_USED_SUBNETS[@]}")
 
-  local used used_ip used_mask
-  for used in "${currently_used_subnets[@]}"; do
-    used_ip="${used%/*}"
-    used_mask="${used##*/}"
+  while true; do
+    MATCHES=0
+    pivpnNET="10.$((RANDOM % 256)).$((RANDOM % 256)).0"
 
-    excluded_subnets_dec+=("$(dotIPv4FirstDec "$used_ip" "$used_mask")")
-    excluded_subnets_dec+=("$(dotIPv4LastDec "$used_ip" "$used_mask")")
-  done
-
-  # Note: excluded_subnets_count array length is twice the number of subnets
-  local excluded_subnets_count="${#excluded_subnets_dec[@]}"
-
-  local source_subnet="$1"
-  local source_ip="${source_subnet%/*}"
-  # shellcheck disable=SC2155
-  local source_ip_dec="$(dotIPv4ToDec "$source_ip")"
-  local source_netmask="${source_subnet##*/}"
-  local source_netmask_dec="$((2 ** 32 - 1 ^ (2 ** (32 - source_netmask) - 1)))"
-
-  local target_netmask="$2"
-
-  local first_ip_target_subnet_dec="$((source_ip_dec & source_netmask_dec))"
-  local total_ips_target_subnet="$((2 ** (32 - target_netmask)))"
-
-  # Picking a random subnet would cause the same subnets to be checked multiple
-  # times shall the number of subnets were small, so instead a random permutation
-  # is scanned to check a subnet only once.
-  local subnets_count="$((2 ** (target_netmask - source_netmask)))"
-  readarray -t random_perm <<< "$(shuf -i 0-"$((subnets_count - 1))")"
-  # random_perm=( 3221 9 8 431 7 [...] )
-
-  # Due to bash performance limitations, it's not pratical to check all subnets.
-  # Taking into account that the install script should not hang for too long even
-  # on a Pi Zero, we avoid doing more than about 5000 iteration.
-  local max_tries="$subnets_count"
-  if [ $((subnets_count * excluded_subnets_count)) -ge 5000 ]; then
-    max_tries="$((5000 / (excluded_subnets_count / 2)))"
-  fi
-
-  local first_ip_subnet_dec last_ip_subnet_dec
-  local first_ip_excluded_subnet_dec last_ip_excluded_subnet_dec
-  local overlap
-  for ((i = 0; i < max_tries; i++)); do
-
-    first_ip_subnet_dec="$((first_ip_target_subnet_dec + total_ips_target_subnet * random_perm[i]))"
-    last_ip_subnet_dec="$((first_ip_subnet_dec + total_ips_target_subnet - 1))"
-
-    overlap=false
-
-    for ((j = 0; j < excluded_subnets_count; j += 2)); do
-
-      first_ip_excluded_subnet_dec="${excluded_subnets_dec[$j]}"
-      last_ip_excluded_subnet_dec="${excluded_subnets_dec[$j + 1]}"
-
-      #                              |-------------subnet2------------|
-      #           |----------subnet1-----------|                      |
-      #           |                  |         |                      |
-      # first_ip_excluded_subnet_dec | last_ip_excluded_subnet_dec    |
-      #                              |                                |
-      #                   first_ip_subnet_dec                last_ip_subnet_dec
-      if ((last_ip_excluded_subnet_dec >= first_ip_subnet_dec)) \
-        && ((first_ip_excluded_subnet_dec <= last_ip_subnet_dec)); then
-        overlap=true
-        break
+    for SUB in "${SUBNET_EXCLUDE_LIST[@]}"; do
+      if grepcidr "${SUB}" <<< "${pivpnNET}/${subnetClass}" \
+        2>&1 > /dev/null; then
+        ((MATCHES++))
       fi
-
     done
 
-    if ! "$overlap"; then
-      decIPv4ToDot "$first_ip_subnet_dec"
+    if [[ "${MATCHES}" -eq 0 ]]; then
       break
     fi
   done
+
+  echo "${pivpnNET}"
 }
 
 setOpenVPNDefaultVars() {
@@ -1884,31 +1745,10 @@ setOpenVPNDefaultVars() {
   # Allow custom NET via unattend setupVARs file.
   # Use default if not provided.
   if [[ -z "${pivpnNET}" ]]; then
-    echo "::: Generating random subnet in network 10.0.0.0/8..."
-    pivpnNET="$(generateRandomSubnet "10.0.0.0/8" "$subnetClass")"
+    pivpnNET="$(generateRandomSubnet)"
   fi
 
-  if [[ -z "${pivpnNET}" ]]; then
-    echo "::: Network 10.0.0.0/8 is unavailable, trying 172.16.0.0/12 next..."
-    pivpnNET="$(generateRandomSubnet "172.16.0.0/12" "$subnetClass")"
-  fi
-
-  if [[ -z "${pivpnNET}" ]]; then
-    echo "::: Network 172.16.0.0/12 is unavailable, trying 192.168.0.0/16 next..."
-    pivpnNET="$(generateRandomSubnet "192.168.0.0/16" "$subnetClass")"
-  fi
-
-  if [[ -z "${pivpnNET}" ]]; then
-    # This should not happen in practice
-    echo "::: Unable to generate a random subnet for PiVPN. Looks like all private networks are in use."
-    exit 1
-  fi
-
-  pivpnNETdec="$(dotIPv4ToDec "${pivpnNET}")"
-
-  vpnGwdec="$((pivpnNETdec + 1))"
-  vpnGw="$(decIPv4ToDot "${vpnGwdec}")"
-  vpnGwhex="$(decIPv4ToHex "${vpnGwdec}")"
+  vpnGw="$(cut -d '.' -f 1-3 <<< "${pivpnNET}").1"
 
   if [[ "${pivpnenableipv6}" -eq 1 ]] \
     && [[ -z "${pivpnNETv6}" ]]; then
@@ -1916,7 +1756,7 @@ setOpenVPNDefaultVars() {
   fi
 
   if [[ "${pivpnenableipv6}" -eq 1 ]]; then
-    vpnGwv6="${pivpnNETv6}${vpnGwhex}"
+    vpnGwv6="${pivpnNETv6}1"
   fi
 }
 
@@ -1929,39 +1769,18 @@ setWireguardDefaultVars() {
   # Allow custom NET via unattend setupVARs file.
   # Use default if not provided.
   if [[ -z "${pivpnNET}" ]]; then
-    echo "::: Generating random subnet in network 10.0.0.0/8..."
-    pivpnNET="$(generateRandomSubnet "10.0.0.0/8" "$subnetClass")"
+    pivpnNET="$(generateRandomSubnet)"
   fi
-
-  if [[ -z "${pivpnNET}" ]]; then
-    echo "::: Network 10.0.0.0/8 is unavailable, trying 172.16.0.0/12 next..."
-    pivpnNET="$(generateRandomSubnet "172.16.0.0/12" "$subnetClass")"
-  fi
-
-  if [[ -z "${pivpnNET}" ]]; then
-    echo "::: Network 172.16.0.0/12 is unavailable, trying 192.168.0.0/16 next..."
-    pivpnNET="$(generateRandomSubnet "192.168.0.0/16" "$subnetClass")"
-  fi
-
-  if [[ -z "${pivpnNET}" ]]; then
-    # This should not happen in practice
-    echo "::: Unable to generate a random subnet for PiVPN. Looks like all private networks are in use."
-    exit 1
-  fi
-
-  pivpnNETdec="$(dotIPv4ToDec "${pivpnNET}")"
-
-  vpnGwdec="$((pivpnNETdec + 1))"
-  vpnGw="$(decIPv4ToDot "${vpnGwdec}")"
-  vpnGwhex="$(decIPv4ToHex "${vpnGwdec}")"
 
   if [[ "${pivpnenableipv6}" -eq 1 ]] \
     && [[ -z "${pivpnNETv6}" ]]; then
     pivpnNETv6="fd11:5ee:bad:c0de::"
   fi
 
+  vpnGw="$(cut -d '.' -f 1-3 <<< "${pivpnNET}").1"
+
   if [[ "${pivpnenableipv6}" -eq 1 ]]; then
-    vpnGwv6="${pivpnNETv6}${vpnGwhex}"
+    vpnGwv6="${pivpnNETv6}1"
   fi
 
   # Allow custom allowed IPs via unattend setupVARs file.
@@ -2345,49 +2164,9 @@ the default" "${r}" "${c}" "${DEFAULT_PORT}" \
   echo "pivpnPORT=${pivpnPORT}" >> "${tempsetupVarsFile}"
 }
 
-setupPiholeDNS() {
-  # Add a custom hosts file for VPN clients so they appear
-  # as 'name.pivpn' in the Pi-hole dashboard as well as resolve
-  # by their names.
-  echo "addn-hosts=/etc/pivpn/hosts.${VPN}" \
-    | ${SUDO} tee "${dnsmasqConfig}" > /dev/null
-
-  # Then create an empty hosts file or clear if it exists.
-  ${SUDO} bash -c "> /etc/pivpn/hosts.${VPN}"
-
-  # Setting Pi-hole to "Listen on all interfaces" allows
-  # dnsmasq to listen on the VPN interface while permitting
-  # queries only from hosts whose address is on the LAN and
-  # VPN subnets.
-  ${SUDO} pihole -a -i local
-
-  # Use the Raspberry Pi VPN IP as DNS server.
-  pivpnDNS1="${vpnGw}"
-
-  {
-    echo "pivpnDNS1=${pivpnDNS1}"
-    echo "pivpnDNS2=${pivpnDNS2}"
-  } >> "${tempsetupVarsFile}"
-
-  # Allow incoming DNS requests through UFW.
-  if [[ "${USING_UFW}" -eq 1 ]]; then
-    ${SUDO} ufw insert 1 allow in \
-      on "${pivpnDEV}" to any port 53 \
-      from "${pivpnNET}/${subnetClass}" > /dev/null
-  else
-    ${SUDO} iptables -I INPUT -i "${pivpnDEV}" \
-      -p udp --dport 53 -j ACCEPT -m comment --comment "pihole-DNS-rule"
-  fi
-}
-
 askClientDNS() {
   if [[ "${runUnattended}" == 'true' ]]; then
-    if [[ "${usePiholeDNS}" == 'true' ]] \
-      && command -v pihole > /dev/null \
-      && [[ -r "${piholeSetupVars}" ]]; then
-      setupPiholeDNS
-      return
-    elif [[ -z "${pivpnDNS1}" ]] \
+    if [[ -z "${pivpnDNS1}" ]] \
       && [[ -n "${pivpnDNS2}" ]]; then
       pivpnDNS1="${pivpnDNS2}"
       unset pivpnDNS2
@@ -2427,11 +2206,10 @@ askClientDNS() {
 
   # Detect and offer to use Pi-hole
   if command -v pihole > /dev/null; then
-    if [[ "${usePiholeDNS}" == 'true' ]] \
-      || whiptail \
-        --backtitle "Setup PiVPN" \
-        --title "Pi-hole" \
-        --yesno "We have detected a Pi-hole installation, \
+    if whiptail \
+      --backtitle "Setup PiVPN" \
+      --title "Pi-hole" \
+      --yesno "We have detected a Pi-hole installation, \
 do you want to use it as the DNS server for the VPN, so you \
 get ad blocking on the go?" "${r}" "${c}"; then
       if [[ ! -r "${piholeSetupVars}" ]]; then
@@ -2439,7 +2217,38 @@ get ad blocking on the go?" "${r}" "${c}"; then
         exit 1
       fi
 
-      setupPiholeDNS
+      # Add a custom hosts file for VPN clients so they appear
+      # as 'name.pivpn' in the Pi-hole dashboard as well as resolve
+      # by their names.
+      echo "addn-hosts=/etc/pivpn/hosts.${VPN}" \
+        | ${SUDO} tee "${dnsmasqConfig}" > /dev/null
+
+      # Then create an empty hosts file or clear if it exists.
+      ${SUDO} bash -c "> /etc/pivpn/hosts.${VPN}"
+
+      # Setting Pi-hole to "Listen on all interfaces" allows
+      # dnsmasq to listen on the VPN interface while permitting
+      # queries only from hosts whose address is on the LAN and
+      # VPN subnets.
+      ${SUDO} pihole -a -i local
+
+      # Use the Raspberry Pi VPN IP as DNS server.
+      pivpnDNS1="${vpnGw}"
+
+      {
+        echo "pivpnDNS1=${pivpnDNS1}"
+        echo "pivpnDNS2=${pivpnDNS2}"
+      } >> "${tempsetupVarsFile}"
+
+      # Allow incoming DNS requests through UFW.
+      if [[ "${USING_UFW}" -eq 1 ]]; then
+        ${SUDO} ufw insert 1 allow in \
+          on "${pivpnDEV}" to any port 53 \
+          from "${pivpnNET}/${subnetClass}" > /dev/null
+      else
+        ${SUDO} iptables -I INPUT -i "${pivpnDEV}" \
+          -p udp --dport 53 -j ACCEPT -m comment --comment "pihole-DNS-rule"
+      fi
       return
     fi
   fi
@@ -2878,6 +2687,16 @@ parameters will be generated on your device." "${r}" "${c}"; then
     echo "pivpnENCRYPT=${pivpnENCRYPT}"
     echo "USE_PREDEFINED_DH_PARAM=${USE_PREDEFINED_DH_PARAM}"
   } >> "${tempsetupVarsFile}"
+}
+
+cidrToMask() {
+  # Source: https://stackoverflow.com/a/20767392
+  set -- $((5 - ($1 / 8))) \
+    255 255 255 255 \
+    $(((255 << (8 - ($1 % 8))) & 255)) \
+    0 0 0
+  shift "${1}"
+  echo "${1-0}.${2-0}.${3-0}.${4-0}"
 }
 
 confOpenVPN() {
