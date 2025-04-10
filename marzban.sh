@@ -1,5 +1,4 @@
-
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 INSTALL_DIR="/opt"
@@ -7,26 +6,28 @@ if [ -z "$APP_NAME" ]; then
     APP_NAME="marzban"
 fi
 APP_DIR="$INSTALL_DIR/$APP_NAME"
+DATA_DIR="/var/lib/$APP_NAME"
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
-
+ENV_FILE="$APP_DIR/.env"
+LAST_XRAY_CORES=5
 
 colorized_echo() {
     local color=$1
     local text=$2
-    
+
     case $color in
         "red")
-        echo -e "\e[91m${text}\e[0m";;
+        printf "\e[91m${text}\e[0m\n";;
         "green")
-        echo -e "\e[92m${text}\e[0m";;
+        printf "\e[92m${text}\e[0m\n";;
         "yellow")
-        echo -e "\e[93m${text}\e[0m";;
+        printf "\e[93m${text}\e[0m\n";;
         "blue")
-        echo -e "\e[94m${text}\e[0m";;
+        printf "\e[94m${text}\e[0m\n";;
         "magenta")
-        echo -e "\e[95m${text}\e[0m";;
+        printf "\e[95m${text}\e[0m\n";;
         "cyan")
-        echo -e "\e[96m${text}\e[0m";;
+        printf "\e[96m${text}\e[0m\n";;
         *)
             echo "${text}"
         ;;
@@ -54,19 +55,18 @@ detect_os() {
         colorized_echo red "Unsupported operating system"
         exit 1
     fi
-    
 }
 
 detect_and_update_package_manager() {
     colorized_echo blue "Updating package manager"
-    if [[ "$OS" == "Ubuntu" ]] || [[ "$OS" == "Debian" ]]; then
+    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
         PKG_MANAGER="apt-get"
         $PKG_MANAGER update
-        elif [[ "$OS" == "CentOS" ]] || [[ "$OS" == "CentOS Linux" ]]; then
+        elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]]; then
         PKG_MANAGER="yum"
         $PKG_MANAGER update -y
-        $PKG_MANAGER epel-release -y
-        elif [ "$OS" == "Fedora" ]; then
+        $PKG_MANAGER install -y epel-release
+        elif [ "$OS" == "Fedora"* ]; then
         PKG_MANAGER="dnf"
         $PKG_MANAGER update
         elif [ "$OS" == "Arch" ]; then
@@ -94,14 +94,14 @@ install_package () {
     if [ -z $PKG_MANAGER ]; then
         detect_and_update_package_manager
     fi
-    
+
     PACKAGE=$1
     colorized_echo blue "Installing $PACKAGE"
-    if [[ "$OS" == "Ubuntu" ]] || [[ "$OS" == "Debian" ]]; then
+    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
         $PKG_MANAGER -y install "$PACKAGE"
-        elif [[ "$OS" == "CentOS" ]] || [[ "$OS" == "CentOS Linux" ]]; then
+        elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]]; then
         $PKG_MANAGER install -y "$PACKAGE"
-        elif [ "$OS" == "Fedora" ]; then
+        elif [ "$OS" == "Fedora"* ]; then
         $PKG_MANAGER install -y "$PACKAGE"
         elif [ "$OS" == "Arch" ]; then
         $PKG_MANAGER -S --noconfirm "$PACKAGE"
@@ -118,33 +118,73 @@ install_docker() {
     colorized_echo green "Docker installed successfully"
 }
 
+install_marzban_script() {
+    FETCH_REPO="Gozargah/Marzban-scripts"
+    SCRIPT_URL="https://github.com/$FETCH_REPO/raw/master/marzban.sh"
+    colorized_echo blue "Installing marzban script"
+    curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/marzban
+    colorized_echo green "marzban script installed successfully"
+}
+
 install_marzban() {
     # Fetch releases
-    FETCH_REPO="Gozargah/Marzban-examples"
-    FETCH_TAG="downloads"
-    URL="https://api.github.com/repos/$FETCH_REPO/releases/tags/$FETCH_TAG"
-    ASSETS=$(curl -s $URL | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .name | sub("\\.tar\\.gz$";"")')
-    if [ -z "$ASSETS" ]; then
-        colorized_echo red "No assets found for tag $FETCH_TAG"
-        exit 1
+    FILES_URL_PREFIX="https://raw.githubusercontent.com/Gozargah/Marzban/master"
+
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$APP_DIR"
+
+    colorized_echo blue "Fetching compose file"
+    curl -sL "$FILES_URL_PREFIX/docker-compose.yml" -o "$APP_DIR/docker-compose.yml"
+    colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
+
+    colorized_echo blue "Fetching .env file"
+    curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"
+    sed -i 's/^# \(XRAY_JSON = .*\)$/\1/' "$APP_DIR/.env"
+    sed -i 's/^# \(SQLALCHEMY_DATABASE_URL = .*\)$/\1/' "$APP_DIR/.env"
+    sed -i 's~\(XRAY_JSON = \).*~\1"/var/lib/marzban/xray_config.json"~' "$APP_DIR/.env"
+    sed -i 's~\(SQLALCHEMY_DATABASE_URL = \).*~\1"sqlite:////var/lib/marzban/db.sqlite3"~' "$APP_DIR/.env"
+    colorized_echo green "File saved in $APP_DIR/.env"
+
+    colorized_echo blue "Fetching xray config file"
+    curl -sL "$FILES_URL_PREFIX/xray_config.json" -o "$DATA_DIR/xray_config.json"
+    colorized_echo green "File saved in $DATA_DIR/xray_config.json"
+
+    colorized_echo green "Marzban's files downloaded successfully"
+}
+
+
+uninstall_marzban_script() {
+    if [ -f "/usr/local/bin/marzban" ]; then
+        colorized_echo yellow "Removing marzban script"
+        rm "/usr/local/bin/marzban"
     fi
-    
-    echo
-    colorized_echo magenta "Marzban has some pre-built configurations based on different needs that you can choose"
-    colorized_echo magenta "See the instructions here for more information: https://github.com/Gozargah/Marzban-examples"
-    # Prompt user to select an asset
-    PS3="Choose one of the setups: "
-    select ASSET in $ASSETS; do
-        if [ -n "$ASSET" ]; then
-            break
-        fi
-    done
-    
-    # Download and extract selected asset to 'marzban' directory
-    DOWNLOAD_URL="https://github.com/$FETCH_REPO/releases/download/$FETCH_TAG/$ASSET.tar.gz"
-    colorized_echo blue "Downloading $DOWNLOAD_URL and extracting to $APP_DIR"
-    curl -sL $DOWNLOAD_URL | tar xz --xform "s/$ASSET/$APP_NAME/" -C $INSTALL_DIR
-    colorized_echo green "Marzban files downloaded and extracted successfully"
+}
+
+uninstall_marzban() {
+    if [ -d "$APP_DIR" ]; then
+        colorized_echo yellow "Removing directory: $APP_DIR"
+        rm -r "$APP_DIR"
+    fi
+}
+
+uninstall_marzban_docker_images() {
+    images=$(docker images | grep marzban | awk '{print $3}')
+
+    if [ -n "$images" ]; then
+        colorized_echo yellow "Removing Docker images of Marzban"
+        for image in $images; do
+            if docker rmi "$image" >/dev/null 2>&1; then
+                colorized_echo yellow "Image $image removed"
+            fi
+        done
+    fi
+}
+
+uninstall_marzban_data_files() {
+    if [ -d "$DATA_DIR" ]; then
+        colorized_echo yellow "Removing directory: $DATA_DIR"
+        rm -r "$DATA_DIR"
+    fi
 }
 
 up_marzban() {
@@ -161,6 +201,19 @@ show_marzban_logs() {
 
 follow_marzban_logs() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
+}
+
+marzban_cli() {
+    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e CLI_PROG_NAME="marzban cli" marzban marzban-cli "$@"
+}
+
+
+update_marzban_script() {
+    FETCH_REPO="Gozargah/Marzban-scripts"
+    SCRIPT_URL="https://github.com/$FETCH_REPO/raw/master/marzban.sh"
+    colorized_echo blue "Updating marzban script"
+    curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/marzban
+    colorized_echo green "marzban script updated successfully"
 }
 
 update_marzban() {
@@ -183,56 +236,6 @@ is_marzban_up() {
     fi
 }
 
-install_acme_sh() {
-    # Install required packages
-    if ! command -v crontab >/dev/null 2>&1; then
-        install_package cron
-    fi
-    install_package cron
-    if ! command -v socat >/dev/null 2>&1; then
-        install_package socat
-    fi
-    
-    colorized_echo blue "Installing acme.sh"
-    curl https://get.acme.sh | sh
-}
-
-ask_for_tls() {
-    echo
-    read -p "Do you want to enable TLS? (y/n) "
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Prompt user for email and domain name
-        read -p "Please enter your email address: " EMAIL
-        while [[ -z $EMAIL ]]; do
-            read -p "Email address cannot be empty. Please enter your email address: " EMAIL
-        done
-        
-        read -p "Please enter your domain name: " DOMAIN_NAME
-        while [[ -z $DOMAIN_NAME ]]; do
-            read -p "Domain name cannot be empty. Please enter your domain name: " DOMAIN_NAME
-        done
-        
-        if ! command -v ~/.acme.sh/acme.sh >/dev/null 2>&1; then
-            install_acme_sh
-        fi
-        
-        # Make a directory to install certs there
-        CERTS_DIR=/var/lib/$APP_NAME/certs
-        mkdir -p $CERTS_DIR
-        
-        # Issue certificate
-        colorized_echo blue "Issuing certificate for $DOMAIN_NAME"
-        ~/.acme.sh/acme.sh --issue --standalone -d $DOMAIN_NAME --force --email $EMAIL --key-file $CERTS_DIR/key.pem --fullchain-file $CERTS_DIR/fullchain.pem
-        
-        # Update xray config file
-        sed -i 's/\"SERVER_NAME\"/'\""$DOMAIN_NAME"\"'/g' $APP_DIR/xray_config.json
-        sed -i 's|/var/lib/marzban/certs|'"$CERTS_DIR"'|g' $APP_DIR/xray_config.json
-        sed -i 's/\/\/\([^/]\)/\1/g' $APP_DIR/xray_config.json
-        
-        colorized_echo green "TLS is enabled for $DOMAIN_NAME"
-    fi
-}
-
 install_command() {
     check_running_as_root
     # Check if marzban is already installed
@@ -245,31 +248,62 @@ install_command() {
         fi
     fi
     detect_os
-    if ! command -v curl >/dev/null 2>&1; then
-        install_package curl
-    fi
     if ! command -v jq >/dev/null 2>&1; then
         install_package jq
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        install_package curl
     fi
     if ! command -v docker >/dev/null 2>&1; then
         install_docker
     fi
     detect_compose
+    install_marzban_script
     install_marzban
-    ask_for_tls
     up_marzban
     follow_marzban_logs
 }
 
+uninstall_command() {
+    check_running_as_root
+    # Check if marzban is installed
+    if ! is_marzban_installed; then
+        colorized_echo red "Marzban's not installed!"
+        exit 1
+    fi
+
+    read -p "Do you really want to uninstall Marzban? (y/n) "
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        colorized_echo red "Aborted"
+        exit 1
+    fi
+
+    detect_compose
+    if is_marzban_up; then
+        down_marzban
+    fi
+    uninstall_marzban_script
+    uninstall_marzban
+    uninstall_marzban_docker_images
+
+    read -p "Do you want to remove Marzban's data files too ($DATA_DIR)? (y/n) "
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        colorized_echo green "Marzban uninstalled successfully"
+    else
+        uninstall_marzban_data_files
+        colorized_echo green "Marzban uninstalled successfully"
+    fi
+}
+
 up_command() {
     help() {
-        colorized_echo red "Usage: marzban.sh up [options]"
+        colorized_echo red "Usage: marzban up [options]"
         echo ""
         echo "OPTIONS:"
         echo "  -h, --help        display this help message"
         echo "  -n, --no-logs     do not follow logs after starting"
     }
-    
+
     local no_logs=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -288,19 +322,20 @@ up_command() {
         esac
         shift
     done
-    
-    detect_compose
+
     # Check if marzban is installed
     if ! is_marzban_installed; then
         colorized_echo red "Marzban's not installed!"
         exit 1
     fi
-    
+
+    detect_compose
+
     if is_marzban_up; then
         colorized_echo red "Marzban's already up"
         exit 1
     fi
-    
+
     up_marzban
     if [ "$no_logs" = false ]; then
         follow_marzban_logs
@@ -308,31 +343,32 @@ up_command() {
 }
 
 down_command() {
-    detect_compose
-    
+
     # Check if marzban is installed
     if ! is_marzban_installed; then
         colorized_echo red "Marzban's not installed!"
         exit 1
     fi
-    
+
+    detect_compose
+
     if ! is_marzban_up; then
         colorized_echo red "Marzban's already down"
         exit 1
     fi
-    
+
     down_marzban
 }
 
 restart_command() {
     help() {
-        colorized_echo red "Usage: marzban.sh restart [options]"
+        colorized_echo red "Usage: marzban restart [options]"
         echo
         echo "OPTIONS:"
         echo "  -h, --help        display this help message"
         echo "  -n, --no-logs     do not follow logs after starting"
     }
-    
+
     local no_logs=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -351,14 +387,15 @@ restart_command() {
         esac
         shift
     done
-    
-    detect_compose
+
     # Check if marzban is installed
     if ! is_marzban_installed; then
         colorized_echo red "Marzban's not installed!"
         exit 1
     fi
-    
+
+    detect_compose
+
     down_marzban
     up_marzban
     if [ "$no_logs" = false ]; then
@@ -367,27 +404,28 @@ restart_command() {
 }
 
 status_command() {
-    detect_compose
-    
+
     # Check if marzban is installed
     if ! is_marzban_installed; then
         echo -n "Status: "
         colorized_echo red "Not Installed"
         exit 1
     fi
-    
+
+    detect_compose
+
     if ! is_marzban_up; then
         echo -n "Status: "
         colorized_echo blue "Down"
         exit 1
     fi
-    
+
     echo -n "Status: "
     colorized_echo green "Up"
-    
+
     json=$($COMPOSE -f $COMPOSE_FILE ps -a --format=json)
-    services=$(echo $json | jq -r '.[] | .Service')
-    states=$(echo $json | jq -r '.[] | .State')
+    services=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .Service')
+    states=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .State')
     # Print out the service names and statuses
     for i in $(seq 0 $(expr $(echo $services | wc -w) - 1)); do
         service=$(echo $services | cut -d' ' -f $(expr $i + 1))
@@ -403,13 +441,13 @@ status_command() {
 
 logs_command() {
     help() {
-        colorized_echo red "Usage: marzban.sh logs [options]"
+        colorized_echo red "Usage: marzban logs [options]"
         echo ""
         echo "OPTIONS:"
         echo "  -h, --help        display this help message"
         echo "  -n, --no-follow   do not show follow logs"
     }
-    
+
     local no_follow=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -428,19 +466,20 @@ logs_command() {
         esac
         shift
     done
-    
-    detect_compose
+
     # Check if marzban is installed
     if ! is_marzban_installed; then
         colorized_echo red "Marzban's not installed!"
         exit 1
     fi
-    
+
+    detect_compose
+
     if ! is_marzban_up; then
         colorized_echo red "Marzban is not up."
         exit 1
     fi
-    
+
     if [ "$no_follow" = true ]; then
         show_marzban_logs
     else
@@ -448,43 +487,206 @@ logs_command() {
     fi
 }
 
-update_command() {
-    detect_compose
-    
+cli_command() {
     # Check if marzban is installed
     if ! is_marzban_installed; then
         colorized_echo red "Marzban's not installed!"
         exit 1
     fi
-    
+
+    detect_compose
+
+    if ! is_marzban_up; then
+        colorized_echo red "Marzban is not up."
+        exit 1
+    fi
+
+    marzban_cli "$@"
+}
+
+update_command() {
+    check_running_as_root
+    # Check if marzban is installed
+    if ! is_marzban_installed; then
+        colorized_echo red "Marzban's not installed!"
+        exit 1
+    fi
+
+    detect_compose
+
+    update_marzban_script
     colorized_echo blue "Pulling latest version"
     update_marzban
-    
+
     colorized_echo blue "Restarting Marzban's services"
     down_marzban
     up_marzban
-    
+
     colorized_echo blue "Marzban updated successfully"
 }
 
 
+identify_the_operating_system_and_architecture() {
+    if [[ "$(uname)" == 'Linux' ]]; then
+        case "$(uname -m)" in
+            'i386' | 'i686')
+                ARCH='32'
+            ;;
+            'amd64' | 'x86_64')
+                ARCH='64'
+            ;;
+            'armv5tel')
+                ARCH='arm32-v5'
+            ;;
+            'armv6l')
+                ARCH='arm32-v6'
+                grep Features /proc/cpuinfo | grep -qw 'vfp' || ARCH='arm32-v5'
+            ;;
+            'armv7' | 'armv7l')
+                ARCH='arm32-v7a'
+                grep Features /proc/cpuinfo | grep -qw 'vfp' || ARCH='arm32-v5'
+            ;;
+            'armv8' | 'aarch64')
+                ARCH='arm64-v8a'
+            ;;
+            'mips')
+                ARCH='mips32'
+            ;;
+            'mipsle')
+                ARCH='mips32le'
+            ;;
+            'mips64')
+                ARCH='mips64'
+                lscpu | grep -q "Little Endian" && ARCH='mips64le'
+            ;;
+            'mips64le')
+                ARCH='mips64le'
+            ;;
+            'ppc64')
+                ARCH='ppc64'
+            ;;
+            'ppc64le')
+                ARCH='ppc64le'
+            ;;
+            'riscv64')
+                ARCH='riscv64'
+            ;;
+            's390x')
+                ARCH='s390x'
+            ;;
+            *)
+                echo "error: The architecture is not supported."
+                exit 1
+            ;;
+        esac
+    else
+        echo "error: This operating system is not supported."
+        exit 1
+    fi
+}
+
+# Function to update the Xray core
+get_xray_core() {
+    identify_the_operating_system_and_architecture
+    # Send a request to GitHub API to get information about the latest four releases
+    latest_releases=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=$LAST_XRAY_CORES")
+
+    # Extract versions from the JSON response
+    versions=($(echo "$latest_releases" | grep -oP '"tag_name": "\K(.*?)(?=")'))
+
+    # Print available versions
+    echo "Available Xray-core versions:"
+    for ((i=0; i<${#versions[@]}; i++)); do
+        echo "$(($i + 1)): ${versions[i]}"
+    done
+
+    # Prompt the user to choose a version
+    printf "Choose a version to install (1-${#versions[@]}), or press Enter to select the latest by default (${versions[0]}): "
+    read choice
+
+    # Check if a choice was made by the user
+    if [ -z "$choice" ]; then
+        choice="1"  # Choose the latest version by default
+    fi
+
+    # Convert the user's choice to an array index
+    choice=$((choice - 1))
+
+    # Ensure the user's choice is within available versions
+    if [ "$choice" -lt 0 ] || [ "$choice" -ge "${#versions[@]}" ]; then
+        echo "Invalid choice. The latest version (${versions[0]}) is selected by default."
+        choice=$((${#versions[@]} - 1))  # Cho#ose the latest version by default
+    fi
+
+    # Select the version of Xray-core to install
+    selected_version=${versions[choice]}
+    echo "Selected version $selected_version for installation."
+
+    # Check if the required packages are installed
+    if ! dpkg -s unzip >/dev/null 2>&1; then
+      echo "Installing required packages..."
+      apt install -y unzip
+    fi
+
+    # Create the /var/lib/marzban/xray-core folder
+    mkdir -p $DATA_DIR/xray-core
+    cd $DATA_DIR/xray-core
+
+    # Download the selected version of Xray-core
+    xray_filename="Xray-linux-$ARCH.zip"
+    xray_download_url="https://github.com/XTLS/Xray-core/releases/download/${selected_version}/${xray_filename}"
+
+    echo "Downloading Xray-core version ${selected_version}..."
+    wget "${xray_download_url}"
+
+    # Extract the file from the archive and delete the archive
+    echo "Extracting Xray-core..."
+    unzip -o "${xray_filename}"
+    rm "${xray_filename}"
+}
+
+
+
+# Function to update the Marzban Main core
+update_core_command() {
+    check_running_as_root
+    get_xray_core
+    # Change the Marzban core
+    marzban_folder='$APP_DIR'
+    xray_executable_path="XRAY_EXECUTABLE_PATH=\"/var/lib/marzban/xray-core/xray\""
+
+    echo "Changing the Marzban core..."
+    # Check if the XRAY_EXECUTABLE_PATH string already exists in the .env file
+    if ! grep -q "^${xray_executable_path}" "$ENV_FILE"; then
+      # If the string does not exist, add it
+      echo "${xray_executable_path}" >> "$ENV_FILE"
+    fi
+
+    # Restart Marzban
+    colorized_echo red "Restarting Marzban..."
+    $APP_NAME restart -n
+    colorized_echo blue "Installation XRAY-CORE version $selected_version completed."
+}
+
 usage() {
-    colorized_echo red "Usage: marzban.sh [command]"
+    colorized_echo red "Usage: marzban [command]"
     echo
     echo "Commands:"
-    echo "  install    Install Marzban"
-    echo "  up         Start services"
-    echo "  down       Stop services"
-    echo "  restart    Restart services"
-    echo "  status     Show status"
-    echo "  logs       Show logs"
-    echo "  update     Update latest version"
+    echo "  up              Start services"
+    echo "  down            Stop services"
+    echo "  restart         Restart services"
+    echo "  status          Show status"
+    echo "  logs            Show logs"
+    echo "  cli             Marzban CLI"
+    echo "  install         Install Marzban"
+    echo "  update          Update latest version"
+    echo "  uninstall       Uninstall Marzban"
+    echo "  install-script  Install Marzban script"
+    echo "  core-update     Update/Change Xray core"
     echo
 }
 
 case "$1" in
-    install)
-    shift; install_command "$@";;
     up)
     shift; up_command "$@";;
     down)
@@ -495,8 +697,18 @@ case "$1" in
     shift; status_command "$@";;
     logs)
     shift; logs_command "$@";;
+    cli)
+    shift; cli_command "$@";;
+    install)
+    shift; install_command "$@";;
     update)
     shift; update_command "$@";;
+    uninstall)
+    shift; uninstall_command "$@";;
+    install-script)
+    shift; install_marzban_script "$@";;
+    core-update)
+    shift; update_core_command "$@";;
     *)
     usage;;
 esac
